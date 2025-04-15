@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { useSocket } from "../hooks/useSocket";
 import API from "../api";
 
 export default function Chat() {
@@ -8,6 +9,8 @@ export default function Chat() {
   const [newMessage, setNewMessage] = useState("");
   const [selectedUser, setSelectedUser] = useState(null);
   const navigate = useNavigate();
+  const { joinRoom, sendMessage, subscribeToMessages } = useSocket();
+  const [currentUser, setCurrentUser] = useState(null);
 
   useEffect(() => {
     // Token kontrolü
@@ -16,6 +19,17 @@ export default function Chat() {
       navigate("/login");
       return;
     }
+
+    // Mevcut kullanıcı bilgisini al
+    API.get("/auth/me")
+      .then((res) => setCurrentUser(res.data))
+      .catch((err) => {
+        console.error(err);
+        if (err.response && err.response.status === 401) {
+          localStorage.removeItem("token");
+          navigate("/login");
+        }
+      });
 
     // Tüm kullanıcıları al
     API.get("/users")
@@ -29,97 +43,140 @@ export default function Chat() {
       });
   }, [navigate]);
 
-  // Seçilen kullanıcıyla mesaj geçmişini al
+  // Seçilen kullanıcıyla sohbet odasına katıl ve mesaj geçmişini al
   useEffect(() => {
-    if (selectedUser) {
+    if (selectedUser && currentUser) {
+      const roomId = [currentUser.id, selectedUser.id].sort().join('-');
+      joinRoom(roomId);
+
       API.get(`/messages/${selectedUser.id}`)
         .then((res) => setMessages(res.data))
         .catch((err) => console.error(err));
+
+      // Gerçek zamanlı mesajları dinle
+      const unsubscribe = subscribeToMessages((message) => {
+        setMessages((prevMessages) => [...prevMessages, message]);
+      });
+
+      return () => unsubscribe();
     }
-  }, [selectedUser]);
+  }, [selectedUser, currentUser, joinRoom, subscribeToMessages]);
 
   // Yeni mesaj gönder
   const handleSendMessage = async (e) => {
     e.preventDefault();
-    if (!newMessage.trim() || !selectedUser) return;
+    if (!newMessage.trim() || !selectedUser || !currentUser) return;
+
+    const roomId = [currentUser.id, selectedUser.id].sort().join('-');
+    const messageData = {
+      roomId,
+      sender: currentUser,
+      receiver: selectedUser,
+      content: newMessage,
+      timestamp: new Date().toISOString(),
+    };
 
     try {
+      // Mesajı veritabanına kaydet
       await API.post("/messages", {
         receiver_id: selectedUser.id,
         content: newMessage,
       });
-      setNewMessage(""); // Mesajı gönderdikten sonra inputu temizle
-      // Mesajlar tekrar çekilsin
-      API.get(`/messages/${selectedUser.id}`)
-        .then((res) => setMessages(res.data))
-        .catch((err) => console.error(err));
+
+      // Mesajı Socket.IO ile gönder
+      sendMessage(messageData);
+      
+      // Mesajı yerel state'e ekle
+      setMessages((prevMessages) => [...prevMessages, messageData]);
+      setNewMessage("");
     } catch (err) {
       console.error("Mesaj gönderilemedi:", err);
     }
   };
 
   return (
-    <div className="flex">
+    <div className="flex h-[calc(100vh-64px)]">
       {/* Kullanıcı Listesi */}
-      <div className="w-1/4 bg-gray-200 p-4">
-        <h2 className="font-bold mb-4">Kullanıcılar</h2>
-        <ul>
-          {users.map((user) => (
-            <li
-              key={user.id}
-              onClick={() => setSelectedUser(user)}
-              className={`cursor-pointer p-2 hover:bg-blue-300 ${
-                selectedUser && selectedUser.id === user.id
-                  ? "bg-blue-500 text-white"
-                  : ""
-              }`}
-            >
-              {user.username}
-            </li>
-          ))}
-        </ul>
+      <div className="w-1/4 bg-gray-100 border-r">
+        <div className="p-4">
+          <h2 className="text-xl font-semibold mb-4">Sohbetler</h2>
+          <div className="space-y-2">
+            {users.filter(user => user.id !== currentUser?.id).map((user) => (
+              <div
+                key={user.id}
+                onClick={() => setSelectedUser(user)}
+                className={`p-3 rounded-lg cursor-pointer transition-colors ${
+                  selectedUser?.id === user.id
+                    ? "bg-blue-500 text-white"
+                    : "hover:bg-gray-200"
+                }`}
+              >
+                <div className="font-medium">{user.username}</div>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
-      {/* Mesaj Geçmişi ve Yeni Mesaj */}
-      <div className="w-3/4 p-4">
-        <h2 className="font-bold mb-4">
-          {selectedUser ? `${selectedUser.username} ile sohbet` : "Bir kullanıcı seçin"}
-        </h2>
-
-        {selectedUser && (
+      {/* Mesajlaşma Alanı */}
+      <div className="flex-1 flex flex-col">
+        {selectedUser ? (
           <>
-            <div className="border p-4 mb-4 h-96 overflow-y-scroll">
-              {/* Mesajlar */}
-              {messages.map((msg) => (
-                <div 
-                  key={msg.id} 
-                  className={`mb-2 p-2 rounded ${
-                    msg.sender.id === selectedUser.id 
-                      ? 'bg-gray-200' 
-                      : 'bg-blue-200 ml-auto'
+            {/* Sohbet Başlığı */}
+            <div className="p-4 bg-white border-b">
+              <h2 className="text-lg font-semibold">
+                {selectedUser.username}
+              </h2>
+            </div>
+
+            {/* Mesaj Geçmişi */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {messages.map((message, index) => (
+                <div
+                  key={index}
+                  className={`flex ${
+                    message.sender.id === currentUser?.id ? "justify-end" : "justify-start"
                   }`}
-                  style={{ maxWidth: '80%' }}
                 >
-                  <strong>{msg.sender.username}: </strong>
-                  {msg.content}
+                  <div
+                    className={`max-w-[70%] rounded-lg p-3 ${
+                      message.sender.id === currentUser?.id
+                        ? "bg-blue-500 text-white"
+                        : "bg-gray-200"
+                    }`}
+                  >
+                    <p>{message.content}</p>
+                    <p className="text-xs opacity-75 mt-1">
+                      {new Date(message.timestamp || message.created_at).toLocaleTimeString()}
+                    </p>
+                  </div>
                 </div>
               ))}
             </div>
 
-            {/* Yeni Mesaj Formu */}
-            <form onSubmit={handleSendMessage} className="flex">
-              <input
-                type="text"
-                value={newMessage}
-                onChange={(e) => setNewMessage(e.target.value)}
-                placeholder="Mesaj yaz..."
-                className="border p-2 w-full mr-2"
-              />
-              <button type="submit" className="bg-blue-500 text-white p-2">
-                Gönder
-              </button>
+            {/* Mesaj Gönderme Formu */}
+            <form onSubmit={handleSendMessage} className="p-4 border-t bg-white">
+              <div className="flex space-x-2">
+                <input
+                  type="text"
+                  value={newMessage}
+                  onChange={(e) => setNewMessage(e.target.value)}
+                  placeholder="Mesajınızı yazın..."
+                  className="flex-1 rounded-lg border p-2 focus:outline-none focus:border-blue-500"
+                />
+                <button
+                  type="submit"
+                  className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors"
+                >
+                  Gönder
+                </button>
+              </div>
             </form>
           </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-gray-500">
+            Sohbet başlatmak için bir kullanıcı seçin
+          </div>
         )}
       </div>
     </div>

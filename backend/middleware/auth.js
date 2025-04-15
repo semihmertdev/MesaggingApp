@@ -1,17 +1,26 @@
 const jwt = require('jsonwebtoken');
+const pool = require('../db');
 
-function authMiddleware(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.sendStatus(401);
-
-  const token = authHeader.split(' ')[1];
+const auth = async (req, res, next) => {
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = payload;
-    next();
-  } catch {
-    res.sendStatus(403);
-  }
-}
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    
+    if (!token) {
+      return res.status(401).json({ error: 'Yetkilendirme token\'ı gerekli' });
+    }
 
-module.exports = authMiddleware;
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await pool.query('SELECT id, username, email FROM users WHERE id = $1', [decoded.userId]);
+
+    if (!user.rows.length) {
+      throw new Error();
+    }
+
+    req.user = user.rows[0];
+    next();
+  } catch (error) {
+    res.status(401).json({ error: 'Lütfen giriş yapın' });
+  }
+};
+
+module.exports = auth;

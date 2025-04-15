@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
+const auth = require('../middleware/auth');
 const router = express.Router();
 
 router.post('/register', async (req, res) => {
@@ -81,6 +82,16 @@ router.post('/login', async (req, res) => {
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Giriş işlemi sırasında bir hata oluştu' });
+  }
+});
+
+// Mevcut kullanıcı bilgilerini getir
+router.get('/me', auth, async (req, res) => {
+  try {
+    res.json(req.user);
+  } catch (error) {
+    console.error('Get current user error:', error);
+    res.status(500).json({ error: 'Kullanıcı bilgileri alınamadı' });
   }
 });
 
